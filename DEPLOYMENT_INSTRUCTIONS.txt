@@ -1,0 +1,36 @@
+# Deployment Instructions for yali-portfolio-v2
+
+## Steps to Commit and Push Changes
+
+1. **Make Changes:**
+   - Edit your files as needed.
+
+2. **Build the Project:**
+   - Run the following command to build the project:
+     ```
+     npm run build
+     ```
+
+3. **Deploy to GitHub Pages:**
+   - Run the following command to deploy the build output to GitHub Pages:
+     ```
+     npx gh-pages -d dist
+     ```
+
+4. **Commit Changes:**
+   - Stage your changes:
+     ```
+     git add .
+     ```
+   - Commit your changes with a message:
+     ```
+     git commit -m "Your commit message"
+     ```
+
+5. **Push Changes to GitHub:**
+   - Push your changes to the main branch:
+     ```
+     git push origin main
+     ```
+
+Your changes should now be live on GitHub Pages.
