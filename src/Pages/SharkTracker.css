@@ -1,0 +1,22 @@
+/* Shark Tracker Page Styles */
+body.shark-tracker-bg {
+  background-color: rgba(26, 26, 26, 0.8);
+}
+
+.shark-tracker {
+  padding: 2rem;
+  text-align: center;
+}
+
+.shark-tracker h1 {
+  color: #646cff;
+  font-size: 2.5rem;
+  margin-bottom: 2rem;
+}
+
+.shark-tracker p {
+  color: #a9adff;
+  font-size: 1.3rem;
+  line-height: 1.6;
+  margin-bottom: 1rem;
+}

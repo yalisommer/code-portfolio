@@ -5,4 +5,15 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   base: '/code-portfolio/',
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      input: '/index.html',
+      output: {
+        manualChunks: {
+          // This ensures that all routes are redirected to index.html
+          fallback: ['index.html']
+        }
+      }
+    }
+  }
 })
