@@ -1,11 +1,8 @@
 import React from 'react';
 import './App.css';
-import Sidebar from './components/Sidebar';
-
 function App() {
   return (
     <div className="app">
-      <Sidebar />
       <div className="home">
         <h1>Yali Sommer</h1>
         
