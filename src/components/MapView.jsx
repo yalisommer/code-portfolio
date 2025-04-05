@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import axios from 'axios';
 import { useRef } from 'react';
 import 'ol/ol.css';
 import Map from 'ol/Map';
 import View from 'ol/View';
 import TileLayer from 'ol/layer/Tile';
+import OSM from 'ol/source/OSM';
 import XYZ from 'ol/source/XYZ';
 import { fromLonLat } from 'ol/proj';
 import Feature from 'ol/Feature';
@@ -14,6 +15,17 @@ import { Vector as VectorLayer } from 'ol/layer';
 import { Vector as VectorSource } from 'ol/source';
 import { Circle as CircleStyle, Fill, Stroke, Style } from 'ol/style';
 import Overlay from 'ol/Overlay';
+import sharkImage from '../assets/shark-img.png'; // Import the shark image
+
+// Constants for data processing
+const CHUNK_SIZE = 1000; // Process data in chunks of 1000 items
+const PROCESSING_INTERVAL = 100; // Process chunks every 100ms
+
+// Dark map style
+const darkMapStyle = new XYZ({
+  url: 'https://{a-c}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+  attributions: '© OpenStreetMap contributors, © CARTO'
+});
 
 function MapView() {
   const mapRef = useRef();
@@ -23,66 +35,181 @@ function MapView() {
   const [selectedShark, setSelectedShark] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [processingProgress, setProcessingProgress] = useState(0);
+
+  // Process data in chunks
+  const processDataChunk = useCallback((data, startIndex) => {
+    const endIndex = Math.min(startIndex + CHUNK_SIZE, data.length);
+    const chunk = data.slice(startIndex, endIndex);
+    
+    // Use objects instead of Maps for simplicity
+    const uniqueSharks = {};
+    const paths = {};
+
+    chunk.forEach(item => {
+      if (!item.Shark || !item.Depth || !item.Length || !item.Latitude || !item.Longitude || !item.timestamp) {
+        return;
+      }
+
+      const sharkId = item.Shark;
+      
+      // Only process if we haven't seen this shark before or if we have less than 10 sharks
+      if (!uniqueSharks[sharkId] && Object.keys(uniqueSharks).length < 10) {
+        // Create unique color for each shark based on index
+        const sharkIndex = Object.keys(uniqueSharks).length;
+        const hue = (sharkIndex * 36) % 360; // Distribute colors evenly
+        const color = `hsla(${hue}, 85%, 70%, 0.8)`; // More pastel: increased lightness, slightly reduced saturation
+        
+        // Store the most recent data point for each shark
+        uniqueSharks[sharkId] = {
+          id: sharkId,
+          depth: item.Depth,
+          length: item.Length,
+          lat: item.Latitude,
+          lng: item.Longitude,
+          timestamp: item.timestamp,
+          color: color
+        };
+
+        // Initialize path for this shark
+        paths[sharkId] = {
+          sharkId: sharkId,
+          points: [{ 
+            lat: item.Latitude, 
+            lng: item.Longitude,
+            timestamp: item.timestamp 
+          }],
+          color: color
+        };
+      } else if (paths[sharkId]) {
+        // Add point to existing path
+        paths[sharkId].points.push({
+          lat: item.Latitude,
+          lng: item.Longitude,
+          timestamp: item.timestamp
+        });
+      }
+    });
+
+    return {
+      sharks: Object.values(uniqueSharks),
+      paths: Object.values(paths)
+    };
+  }, []);
 
   useEffect(() => {
     const fetchSharkData = async () => {
       try {
-        const response = await axios.get('shark_data.json');
+        console.log('Attempting to fetch shark data...');
+        const response = await axios.get('/code-portfolio/shark_data.json');
+        console.log('Response received:', {
+          status: response.status,
+          statusText: response.statusText,
+          dataType: typeof response.data,
+          isArray: Array.isArray(response.data),
+          dataLength: Array.isArray(response.data) ? response.data.length : 'not an array'
+        });
+        
         const rawData = response.data;
-        console.log('Raw data fetched:', rawData);
-    
-        // Transform the raw data into the expected format
-        const sharks = rawData.map(item => {
-          if (!item.Shark || !item.Depth || !item.Length || !item.Latitude || !item.Longitude || !item.timestamp) {
-            console.warn('Invalid data item:', item);
-            return null; // Skip invalid items
+        
+        // Validate that rawData is an array
+        if (!Array.isArray(rawData)) {
+          throw new Error(`Invalid data format: Expected an array of shark data, got ${typeof rawData}`);
+        }
+        
+        // Check if we have any data
+        if (rawData.length === 0) {
+          throw new Error('No shark data available');
+        }
+
+        console.log(`Successfully loaded ${rawData.length} shark data points`);
+
+        // First, identify the 10 unique sharks we want to track
+        const uniqueSharkIds = new Set();
+        for (const item of rawData) {
+          if (item.Shark && !uniqueSharkIds.has(item.Shark)) {
+            uniqueSharkIds.add(item.Shark);
+            if (uniqueSharkIds.size >= 10) break;
           }
-  
-          return {
-            id: item.Shark,
-            depth: item.Depth,
-            length: item.Length,
-            lat: item.Latitude,
-            lng: item.Longitude,
-            timestamp: item.timestamp,
-            color: item.Sex === 'M' ? '#0000FF' : '#FF00FF' // Example color coding by sex
-          };
-        }).filter(item => item !== null); // Remove null items
-    
-        const paths = rawData.reduce((acc, item) => {
-          const sharkPath = acc.find(path => path.sharkId === item.Shark);
-          const point = { lat: item.Latitude, lng: item.Longitude };
-    
-          if (sharkPath) {
-            sharkPath.points.push(point);
+        }
+        
+        console.log('Unique shark IDs:', Array.from(uniqueSharkIds));
+
+        // Filter data to only include our 10 sharks
+        const filteredData = rawData.filter(item => 
+          item.Shark && uniqueSharkIds.has(item.Shark)
+        );
+        
+        console.log('Filtered data length:', filteredData.length);
+
+        // Process all data at once instead of in chunks to avoid duplicates
+        const uniqueSharks = {};
+        const paths = {};
+
+        // Sort data by timestamp to ensure we get the most recent data for each shark
+        const sortedData = [...filteredData].sort((a, b) => 
+          new Date(b.timestamp) - new Date(a.timestamp)
+        );
+
+        // Process each shark's data
+        sortedData.forEach(item => {
+          if (!item.Shark || !item.Depth || !item.Length || !item.Latitude || !item.Longitude || !item.timestamp) {
+            return;
+          }
+
+          const sharkId = item.Shark;
+          
+          // Only process if we haven't seen this shark before
+          if (!uniqueSharks[sharkId]) {
+            // Create unique color for each shark based on index
+            const sharkIndex = Object.keys(uniqueSharks).length;
+            const hue = (sharkIndex * 36) % 360; // Distribute colors evenly
+            const color = `hsla(${hue}, 85%, 70%, 0.8)`; // More pastel: increased lightness, slightly reduced saturation
+            
+            // Store the most recent data point for each shark
+            uniqueSharks[sharkId] = {
+              id: sharkId,
+              depth: item.Depth,
+              length: item.Length,
+              lat: item.Latitude,
+              lng: item.Longitude,
+              timestamp: item.timestamp,
+              color: color
+            };
+
+            // Initialize path for this shark
+            paths[sharkId] = {
+              sharkId: sharkId,
+              points: [{ 
+                lat: item.Latitude, 
+                lng: item.Longitude,
+                timestamp: item.timestamp 
+              }],
+              color: color
+            };
           } else {
-            acc.push({
-              sharkId: item.Shark,
-              points: [point],
-              color: item.Sex === 'M' ? '#0000FF' : '#FF00FF'
+            // Add point to existing path
+            paths[sharkId].points.push({
+              lat: item.Latitude,
+              lng: item.Longitude,
+              timestamp: item.timestamp
             });
           }
-    
-          return acc;
-        }, []);
-    
-        setSharkData({ sharks, paths });
+        });
+
+        // Sort paths by timestamp to ensure chronological order
+        Object.values(paths).forEach(path => {
+          path.points.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        });
+        
+        setSharkData({
+          sharks: Object.values(uniqueSharks),
+          paths: Object.values(paths)
+        });
         setLoading(false);
       } catch (error) {
-        if (error.response) {
-          // Server responded with a status other than 2xx
-          console.error('Server responded with an error:', error.response.status, error.response.data);
-          setError(`Server error: ${error.response.status} - ${error.response.data}`);
-        } else if (error.request) {
-          // Request was made but no response received
-          console.error('Network error, no response received:', error.request);
-          setError('Network error: Failed to receive a response from the server');
-        } else {
-          // Something else happened
-          console.error('Error during data transformation:', error.message);
-          //setError('Error processing shark data');
-          setError('Under maintenance!')
-        }
+        console.error('Error fetching shark data:', error);
+        setError('The shark tracking system is currently under maintenance. Please check back later.');
         setLoading(false);
       }
     };
@@ -98,21 +225,73 @@ function MapView() {
       target: mapElement.current,
       layers: [
         new TileLayer({
-          source: new XYZ({
-            url: 'https://{a-c}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-            attributions: '© OpenStreetMap contributors'
-          })
+          source: darkMapStyle
         })
       ],
       view: new View({
-        center: fromLonLat([-117, 27]),
-        zoom: 7,
+        center: fromLonLat([-118.2615, 29.1148]), // Centered on Guadalupe Island
+        zoom: 10,
         minZoom: 4,
         maxZoom: 12
       })
     });
 
     const vectorSource = new VectorSource();
+    const vectorLayer = new VectorLayer({
+      source: vectorSource,
+      style: (feature) => {
+        const type = feature.get('type');
+        if (type === 'shark') {
+          const shark = feature.get('sharkData');
+          const isSelected = selectedShark && shark.id === selectedShark.id;
+          return new Style({
+            image: new CircleStyle({
+              radius: isSelected ? 8 : 6,
+              fill: new Fill({
+                color: shark.color
+              }),
+              stroke: new Stroke({
+                color: '#ffffff',
+                width: isSelected ? 3 : 2
+              })
+            })
+          });
+        } else {
+          return new Style({
+            stroke: new Stroke({
+              color: feature.get('color'),
+              width: 2
+            })
+          });
+        }
+      }
+    });
+
+    vectorLayerRef.current = vectorLayer;
+    map.addLayer(vectorLayer);
+
+    map.on('click', (event) => {
+      const feature = map.forEachFeatureAtPixel(event.pixel, feature => feature);
+      const clickedShark = feature?.get('sharkData');
+      
+      if (clickedShark) {
+        setSelectedShark(prev => 
+          prev && prev.id === clickedShark.id ? null : clickedShark
+        );
+      } else {
+        setSelectedShark(null);
+      }
+    });
+
+    mapRef.current = map;
+  }, [loading, error, selectedShark]);
+
+  // Update features when data changes
+  useEffect(() => {
+    if (!vectorLayerRef.current || loading) return;
+
+    const vectorSource = vectorLayerRef.current.getSource();
+    vectorSource.clear();
 
     // Add shark paths
     sharkData.paths?.forEach(path => {
@@ -141,215 +320,197 @@ function MapView() {
       vectorSource.addFeature(marker);
     });
 
-    // Initial style function
-    const initialStyle = (feature) => {
-      const type = feature.get('type');
-      
-      if (type === 'shark') {
-        const shark = feature.get('sharkData');
-        return new Style({
-          image: new CircleStyle({
-            radius: 6,
-            fill: new Fill({
-              color: shark.color
-            }),
-            stroke: new Stroke({
-              color: '#ffffff',
-              width: 2
-            })
-          })
-        });
-      } else {
-        return new Style({
-          stroke: new Stroke({
-            color: feature.get('color'),
-            width: 2
-          })
-        });
-      }
-    };
+    if (mapRef.current) {
+      mapRef.current.render();
+    }
+  }, [sharkData, loading]);
 
-    const vectorLayer = new VectorLayer({
-      source: vectorSource,
-      style: initialStyle
-    });
-
-    vectorLayerRef.current = vectorLayer;
-    map.addLayer(vectorLayer);
-
-    // Handle click events
-    map.on('click', (event) => {
-      const feature = map.forEachFeatureAtPixel(event.pixel, feature => feature);
-      const clickedShark = feature?.get('sharkData');
-      
-      if (clickedShark) {
-        if (selectedShark && clickedShark.id === selectedShark.id) {
-          setSelectedShark(null);
-        } else {
-          setSelectedShark(clickedShark);
-        }
-      } else {
-        setSelectedShark(null);
-      }
-    });
-
-    mapRef.current = map;
-  }, [loading, error, sharkData]);
-
-  // Update styles when selection changes
+  // Update map style when selected shark changes
   useEffect(() => {
     if (!vectorLayerRef.current) return;
-
-    const createStyle = (feature) => {
+    
+    const vectorLayer = vectorLayerRef.current;
+    
+    // Update the style function to handle selected shark
+    vectorLayer.setStyle((feature) => {
       const type = feature.get('type');
       
       if (type === 'shark') {
         const shark = feature.get('sharkData');
         const isSelected = selectedShark && shark.id === selectedShark.id;
-        const isUnselected = selectedShark && !isSelected;
-
+        
         return new Style({
           image: new CircleStyle({
             radius: isSelected ? 8 : 6,
             fill: new Fill({
-              color: isUnselected ? 'rgba(128, 128, 128, 0.6)' : shark.color
+              color: selectedShark ? (isSelected ? shark.color : 'rgba(128, 128, 128, 0.6)') : shark.color
             }),
             stroke: new Stroke({
-              color: isUnselected ? 'rgba(160, 160, 160, 0.8)' : '#ffffff',
+              color: '#ffffff',
               width: isSelected ? 3 : 2
             })
           })
         });
-      } else {
+      } else if (type === 'path') {
         const sharkId = feature.get('sharkId');
-        const isSelected = selectedShark && sharkId === selectedShark.id;
-        const isUnselected = selectedShark && !isSelected;
-
+        const isSelectedSharkPath = selectedShark && sharkId === selectedShark.id;
+        
         return new Style({
           stroke: new Stroke({
-            color: isUnselected ? 'rgba(128, 128, 128, 0.4)' : feature.get('color'),
-            width: isSelected ? 3 : 2
+            color: selectedShark ? (isSelectedSharkPath ? feature.get('color') : 'rgba(128, 128, 128, 0.6)') : feature.get('color'),
+            width: isSelectedSharkPath ? 3 : 2
           })
         });
       }
-    };
-
-    vectorLayerRef.current.setStyle(createStyle);
+    });
     
     if (mapRef.current) {
       mapRef.current.render();
     }
   }, [selectedShark]);
 
-  // Force plot reload when selected shark changes
-  useEffect(() => {
-    if (selectedShark) {
-      // Create a new image element to force reload
-      const img = new Image();
-      img.src = `http://localhost:8000/sharks/${selectedShark.id}/plot?force=${Math.random()}`;
-    }
-  }, [selectedShark]);
-
-  const sortedSharks = [...(sharkData.sharks || [])].sort((a, b) => {
-    const aNum = parseInt(a.id.replace('WS', ''));
-    const bNum = parseInt(b.id.replace('WS', ''));
-    return aNum - bNum;
-  });
-
-  // Handle legend item click
-  const handleSharkSelect = (shark) => {
-    if (selectedShark && selectedShark.id === shark.id) {
-      setSelectedShark(null);
-    } else {
-      setSelectedShark(shark);
-    }
-  };
-
   if (error) {
-      return <div className="error">Error: {error}</div>;
+    return (
+      <div style={{
+        padding: '2rem',
+        textAlign: 'center',
+        backgroundColor: 'rgba(26, 26, 26, 0.8)',
+        borderRadius: '8px',
+        border: '1px solid rgba(45, 95, 138, 0.3)',
+        color: '#646cff',
+        fontSize: '1.2rem',
+        margin: '2rem auto',
+        maxWidth: '600px'
+      }}>
+        <h2 style={{ color: '#2d5f8a', marginBottom: '1rem' }}>Shark Tracker Status</h2>
+        <p>{error}</p>
+      </div>
+    );
   }
 
   if (loading) {
-    return <div className="loading">Loading map data...</div>;
+    return (
+      <div className="loading-container">
+        <img
+          src={sharkImage}
+          alt="Loading..."
+          className="loading-shark"
+          style={{
+            width: '100px',
+            height: '100px',
+            objectFit: 'contain',
+            marginBottom: '1rem',
+            animation: 'spin 2s linear infinite'
+          }}
+        />
+        <div style={{
+          width: '200px',
+          height: '4px',
+          backgroundColor: 'rgba(255, 255, 255, 0.1)',
+          borderRadius: '2px',
+          marginBottom: '1rem'
+        }}>
+          <div style={{
+            width: `${processingProgress}%`,
+            height: '100%',
+            backgroundColor: '#646cff',
+            borderRadius: '2px',
+            transition: 'width 0.3s ease'
+          }} />
+        </div>
+        <p>Loading shark data... {Math.round(processingProgress)}%</p>
+      </div>
+    );
   }
 
   return (
     <div style={{ position: 'relative', width: '100%' }}>
-      {/* Map Container */}
-      <div style={{ width: '100%', height: '600px', marginBottom: selectedShark ? '20px' : '0' }}>
+      <div style={{ 
+        width: '100%', 
+        height: '600px', 
+        marginBottom: selectedShark ? '20px' : '0',
+        borderRadius: '8px',
+        overflow: 'hidden',
+        boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)',
+        border: '1px solid rgba(45, 95, 138, 0.3)'
+      }}>
         <div ref={mapElement} style={{ width: '100%', height: '100%' }} />
         
-        {/* Shark Info Panel */}
-        <div className="shark-info-panel" style={{
-          position: 'absolute',
-          top: '20px',
-          left: '20px',
-          background: 'rgba(0, 0, 0, 0.8)',
-          padding: '20px',
-          borderRadius: '8px',
-          color: 'white',
-          maxWidth: '300px',
-          border: '1px solid rgba(45, 95, 138, 0.3)',
-          display: selectedShark ? 'block' : 'none'
-        }}>
-          {selectedShark && (
-            <>
-              <h3 style={{ color: '#2d5f8a', marginTop: 0 }}>Shark {parseInt(selectedShark.id.replace('WS', ''))}</h3>
-              <div style={{ marginTop: '15px' }}>
-                <p><strong>Depth:</strong> {selectedShark.depth}m</p>
-                <p><strong>Length:</strong> {selectedShark.length}m</p>
-                <p><strong>Location:</strong></p>
-                <p>Latitude: {selectedShark.lat.toFixed(4)}°</p>
-                <p>Longitude: {selectedShark.lng.toFixed(4)}°</p>
-                <p><strong>Last Updated:</strong></p>
-                <p>{new Date(selectedShark.timestamp).toLocaleString()}</p>
-              </div>
-              <button
-                onClick={() => setSelectedShark(null)}
-                style={{
-                  marginTop: '15px',
-                  padding: '8px 15px',
-                  background: '#2d5f8a',
-                  border: 'none',
-                  borderRadius: '4px',
-                  color: 'white',
-                  cursor: 'pointer'
-                }}
-              >
-                Clear Selection
-              </button>
-            </>
-          )}
-        </div>
+        {selectedShark && (
+          <div style={{
+            position: 'absolute',
+            top: '20px',
+            left: '20px',
+            background: 'rgba(26, 26, 26, 0.8)',
+            padding: '20px',
+            borderRadius: '8px',
+            color: 'white',
+            maxWidth: '300px',
+            border: '1px solid rgba(45, 95, 138, 0.3)',
+            boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
+          }}>
+            <h3 style={{ color: '#2d5f8a', marginTop: 0 }}>Shark {selectedShark.id}</h3>
+            <div style={{ marginTop: '15px' }}>
+              <p><strong>Depth:</strong> {selectedShark.depth}m</p>
+              <p><strong>Length:</strong> {selectedShark.length}m</p>
+              <p><strong>Location:</strong></p>
+              <p>Latitude: {selectedShark.lat.toFixed(4)}°</p>
+              <p>Longitude: {selectedShark.lng.toFixed(4)}°</p>
+              <p><strong>Last Updated:</strong></p>
+              <p>{new Date(selectedShark.timestamp).toLocaleString()}</p>
+            </div>
+            <button
+              onClick={() => setSelectedShark(null)}
+              style={{
+                marginTop: '15px',
+                padding: '8px 15px',
+                background: '#2d5f8a',
+                border: 'none',
+                borderRadius: '4px',
+                color: 'white',
+                cursor: 'pointer',
+                transition: 'background-color 0.2s ease'
+              }}
+              onMouseOver={(e) => e.target.style.backgroundColor = '#1a4a7a'}
+              onMouseOut={(e) => e.target.style.backgroundColor = '#2d5f8a'}
+            >
+              Clear Selection
+            </button>
+          </div>
+        )}
         
-        {/* Legend */}
-        <div className="map-legend" style={{
+        <div style={{
           position: 'absolute',
           top: '20px',
           right: '20px',
-          background: 'rgba(0, 0, 0, 0.8)',
+          background: 'rgba(26, 26, 26, 0.8)',
           padding: '15px',
           borderRadius: '8px',
           color: 'white',
           maxHeight: '80%',
           overflowY: 'auto',
           zIndex: 1000,
-          border: '1px solid rgba(45, 95, 138, 0.3)'
+          border: '1px solid rgba(45, 95, 138, 0.3)',
+          boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
         }}>
           <h3 style={{ margin: '0 0 10px 0', color: '#2d5f8a' }}>Shark Tracking</h3>
           <p style={{ fontSize: '14px', marginBottom: '10px' }}>Click on a shark to view details</p>
-          {sortedSharks.map(shark => (
+          {[...(sharkData.sharks || [])].sort((a, b) => {
+            const aNum = parseInt(a.id.replace('WS', ''));
+            const bNum = parseInt(b.id.replace('WS', ''));
+            return aNum - bNum;
+          }).map(shark => (
             <div
-              key={shark.id}
-              className="legend-item"
-              onClick={() => handleSharkSelect(shark)}
+              key={`shark-${shark.id}`}
+              onClick={() => setSelectedShark(prev => prev?.id === shark.id ? null : shark)}
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 marginBottom: '8px',
                 fontSize: '14px',
                 opacity: selectedShark ? (selectedShark.id === shark.id ? 1 : 0.5) : 1,
-                cursor: 'pointer'
+                cursor: 'pointer',
+                transition: 'opacity 0.2s ease'
               }}
             >
               <div style={{
@@ -367,21 +528,21 @@ function MapView() {
         </div>
       </div>
 
-      {/* Plot Section */}
       {selectedShark && (
         <div style={{
           width: '100%',
           padding: '20px',
           backgroundColor: 'rgba(26, 26, 26, 0.8)',
           borderRadius: '8px',
-          border: '1px solid rgba(45, 95, 138, 0.3)'
+          border: '1px solid rgba(45, 95, 138, 0.3)',
+          boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
         }}>
           <h2 style={{ color: '#2d5f8a', marginBottom: '20px' }}>
-            Movement Track for Shark {parseInt(selectedShark.id.replace('WS', ''))}
+            Movement Track for Shark {selectedShark.id}
           </h2>
           <img
-            src={`http://localhost:8000/sharks/${selectedShark.id}/plot?nocache=${Math.random()}`}
-            alt={`Movement track for Shark ${parseInt(selectedShark.id.replace('WS', ''))}`}
+            src={`/code-portfolio/plots/shark_${selectedShark.id}.png`}
+            alt={`Movement track for Shark ${selectedShark.id}`}
             style={{
               maxWidth: '100%',
               height: 'auto',
@@ -389,8 +550,8 @@ function MapView() {
               boxShadow: '0 4px 15px rgba(45, 95, 138, 0.2)'
             }}
             onError={(e) => {
-              // If image fails to load, try reloading it
-              e.target.src = `http://localhost:8000/sharks/${selectedShark.id}/plot?reload=${Math.random()}`;
+              e.target.src = '/code-portfolio/plots/shark_WS1.png'; // Fallback to first shark's plot
+              e.target.alt = 'Shark track visualization not available';
             }}
           />
         </div>
